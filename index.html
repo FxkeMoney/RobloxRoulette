@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Lobby</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<style>
+body { background-color: #121212; color: #fff; }
+.form-label { color: #ccc !important; }
+.toast-container { position: fixed; bottom: 1rem; right: 1rem; z-index: 9999; }
+.host-name {
+  background: linear-gradient(270deg, #ff0000, #ff4d4d, #ff0000);
+  background-size: 400% 400%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: red-gradient 3s ease infinite;
+}
+</style>
+</head>
+<body>
+
+<div id="mainContent" class="container py-5">
+  <div class="row justify-content-center">
+    <div class="col-md-6">
+      <h1 class="mb-4 text-center">Session Lobby</h1>
+      <div class="mb-3">
+        <label for="nameInput" class="form-label">Your Name</label>
+        <input type="text" class="form-control" id="nameInput" placeholder="Enter your Roblox name">
+      </div>
+      <div class="mb-3">
+        <label for="sessionInput" class="form-label">Session ID (leave blank to create new)</label>
+        <input type="text" class="form-control" id="sessionInput" placeholder="Enter session ID">
+      </div>
+      <button class="btn btn-primary w-100" id="joinBtn">Join Session</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<div id="dashboard"></div>
+
+<script>
+const workerUrl = "https://roblox.0x606.workers.dev/";
+
+let peer, isHost = false;
+let connections = {};
+let userData = {};
+let myPeerId;
+let hostPeerId = null;
+let currentGameId = null;
+
+document.getElementById('joinBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('joinBtn');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Joining...`;
+
+  const name = document.getElementById('nameInput').value.trim();
+  const session = document.getElementById('sessionInput').value.trim();
+
+  if (!name) {
+    showToast("Enter your name.", "warning");
+    btn.disabled = false;
+    btn.innerHTML = "Join Session";
+    return;
+  }
+
+  const res = await fetch(workerUrl, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ username: name })
+  });
+  const data = await res.json();
+  const avatarUrl = data.success ? data.imageUrl : "https://static.wikia.nocookie.net/roblox/images/6/6b/Guest.png";
+
+  userData = { name, avatarUrl };
+
+  peer = new Peer();
+  peer.on('open', () => {
+    myPeerId = peer.id;
+
+    if (!session) {
+      isHost = true;
+      hostPeerId = myPeerId;
+      connections[myPeerId] = { ...userData };
+      renderDashboard(hostPeerId);
+      updateUserList(connections);
+
+      peer.on('connection', (c) => {
+        c.on('data', (d) => {
+          if (!connections[c.peer]) {
+            connections[c.peer] = { ...d, conn: c };
+            broadcastUserList();
+          }
+        });
+        c.on('close', () => {
+          delete connections[c.peer];
+          broadcastUserList();
+        });
+      });
+    } else {
+      isHost = false;
+      const conn = peer.connect(session);
+      conn.on('open', () => conn.send(userData));
+      conn.on('data', (msg) => {
+        if (msg.type === 'userList') {
+          hostPeerId = msg.host;
+          connections = msg.users;
+          renderDashboard(hostPeerId);
+          updateUserList(connections);
+        } else if (msg.type === 'generate') {
+          showGeneratedGame(msg.game);
+        }
+      });
+    }
+  });
+
+  btn.disabled = false;
+  btn.innerHTML = "Join Session";
+});
+
+function renderDashboard(sessionId) {
+  document.getElementById('mainContent').remove();
+  document.getElementById('dashboard').innerHTML = `
+  <div class="container-fluid">
+    <div class="row vh-100">
+      <nav class="col-md-3 bg-dark p-3 d-flex flex-column">
+        <h4>${isHost ? "Host" : "Guest"}</h4>
+        <p>Session ID: <code>${sessionId}</code></p>
+        <div id="userListContainer" class="mt-3">
+          <h5>Users</h5>
+          <div id="userList"></div>
+        </div>
+      </nav>
+      <main class="col-12 col-md-9 p-4">
+        <h1>Dashboard</h1>
+        <button class="btn btn-primary mb-4" id="generateBtn" ${isHost ? '' : 'disabled'}>Generate</button>
+        <div id="gameCard"></div>
+      </main>
+    </div>
+  </div>`;
+
+  if (isHost) {
+    document.getElementById("generateBtn").addEventListener("click", async () => {
+      const btn = document.getElementById("generateBtn");
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Generating...`;
+
+      const res = await fetch(workerUrl, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ action: "randomGame" })
+      });
+      const data = await res.json();
+      if (data.success && data.game) {
+        showGeneratedGame(data.game);
+        broadcastToGuests({ type: "generate", game: data.game });
+        showToast(`Game generated: ${data.game.name}`, "success");
+      } else {
+        showToast(`Failed to generate game.`, "danger");
+      }
+
+      btn.disabled = false;
+      btn.innerHTML = "Generate";
+    });
+  }
+}
+
+function broadcastUserList() {
+  const cleanList = {};
+  Object.keys(connections).forEach(pid => {
+    cleanList[pid] = {
+      name: connections[pid].name,
+      avatarUrl: connections[pid].avatarUrl
+    };
+  });
+  Object.keys(connections).forEach(pid => {
+    if (connections[pid].conn) {
+      connections[pid].conn.send({ type: 'userList', users: cleanList, host: hostPeerId });
+    }
+  });
+  updateUserList(cleanList);
+}
+
+function updateUserList(list) {
+  const userList = document.getElementById('userList');
+  if (!userList) return;
+
+  userList.innerHTML = '';
+  Object.keys(list).forEach(pid => {
+    const u = list[pid];
+    const isHostPeer = pid === hostPeerId;
+    const div = document.createElement('div');
+    div.classList.add('d-flex', 'align-items-center', 'mb-2');
+    div.innerHTML = `
+      <img src="${u.avatarUrl}" class="rounded-circle me-2" width="32" height="32">
+      <span class="${isHostPeer ? 'host-name' : ''}">${u.name}</span>
+      ${isHostPeer ? '<small class="badge bg-danger ms-1">Host</small>' : ''}
+    `;
+    userList.appendChild(div);
+  });
+}
+
+function broadcastToGuests(message) {
+  Object.keys(connections).forEach(pid => {
+    if (connections[pid].conn) {
+      connections[pid].conn.send(message);
+    }
+  });
+}
+
+let currentPlaceId = null;
+
+async function showGeneratedGame(game) {
+  currentPlaceId = game.placeId;  // ✅ FIXED
+
+  const card = document.getElementById("gameCard");
+  card.innerHTML = `
+    <div class="card bg-dark text-light">
+      <div class="card-body">
+        <h5 class="card-title">${game.name || "Unknown Game"}</h5>
+        <img src="${game.thumbnail || "https://via.placeholder.com/128"}" alt="" class="img-fluid mb-2" style="max-width: 128px;">
+        <p>${game.description || "No description available."}</p>
+        <div>
+          <span class="badge bg-success">Likes: ${game.likes ?? 0}</span>
+          <span class="badge bg-danger">Dislikes: ${game.dislikes ?? 0}</span>
+          <span class="badge bg-primary">Visits: ${game.visits ?? 0}</span>
+          <span class="badge bg-warning">Active: ${game.playing ?? 0}</span>
+        </div>
+        <button class="btn btn-success mt-3" id="joinGameBtn">Join</button>
+      </div>
+    </div>`;
+
+  document.getElementById("joinGameBtn").addEventListener("click", joinGame);
+}
+
+async function joinGame() {
+  if (!currentPlaceId) {
+    showToast("No game to join.", "warning");
+    return;
+  }
+
+  showToast("Finding server to join…", "info");
+  try {
+    const res = await fetch(workerUrl, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ action: "joinServer", placeId: currentPlaceId })
+    });
+    const data = await res.json();
+
+    if (data.success && data.jobId) {
+      window.location.href = `roblox://placeID=${currentPlaceId}&gameInstanceId=${data.jobId}`;
+    } else {
+      showToast("No joinable server found. Starting new server…", "warning");
+      window.location.href = `roblox://placeID=${currentPlaceId}`;
+    }
+  } catch (err) {
+    showToast(`Error joining game: ${err.message}`, "danger");
+  }
+}
+
+
+function showToast(message, type="info") {
+  const container = document.getElementById("toastContainer");
+  const toast = document.createElement("div");
+  toast.className = `toast align-items-center text-bg-${type} border-0 show`;
+  toast.innerHTML = `<div class="d-flex">
+    <div class="toast-body">${message}</div>
+    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+  </div>`;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 5000);
+}
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
