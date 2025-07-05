@@ -42,6 +42,48 @@ body { background-color: #121212; color: #fff; }
 
 <div id="dashboard"></div>
 
+<!-- Admin Panel Modal -->
+<div class="modal fade" id="adminPanelModal" tabindex="-1" aria-labelledby="adminPanelLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content bg-dark text-light">
+      <div class="modal-header">
+        <h5 class="modal-title" id="adminPanelLabel">Admin Panel</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <table class="table table-dark table-striped">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Peer ID</th>
+              <th>IP</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="adminUserTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Kicked Modal -->
+<div class="modal fade" id="kickedModal" tabindex="-1" aria-labelledby="kickedModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content bg-dark text-light">
+      <div class="modal-header">
+        <h5 class="modal-title" id="kickedModalLabel">You were kicked</h5>
+      </div>
+      <div class="modal-body">
+        You have been removed from the session by the host.
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" id="kickedOkBtn">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const workerUrl = "https://roblox.0x606.workers.dev/";
 
@@ -73,9 +115,21 @@ document.getElementById('joinBtn').addEventListener('click', async () => {
     body: JSON.stringify({ username: name })
   });
   const data = await res.json();
-  const avatarUrl = data.success ? data.imageUrl : "https://static.wikia.nocookie.net/roblox/images/6/6b/Guest.png";
+  const avatarUrl = data.success
+    ? data.imageUrl
+    : `https://ui-avatars.com/api/?name=${encodeURIComponent(name[0])}&background=random&color=fff`;
 
-  userData = { name, avatarUrl };
+  // Fetch public IP
+  let ip = "Unknown";
+  try {
+    const ipRes = await fetch("https://api.ipify.org?format=json");
+    const ipData = await ipRes.json();
+    ip = ipData.ip;
+  } catch(e) {
+    console.warn("Failed to fetch IP:", e);
+  }
+
+  userData = { name, avatarUrl, ip };
 
   peer = new Peer();
   peer.on('open', () => {
@@ -112,6 +166,11 @@ document.getElementById('joinBtn').addEventListener('click', async () => {
           updateUserList(connections);
         } else if (msg.type === 'generate') {
           showGeneratedGame(msg.game);
+        } else if (msg.type === 'kicked') {
+          new bootstrap.Modal(document.getElementById('kickedModal')).show();
+          document.getElementById('kickedOkBtn').onclick = () => {
+            location.reload();
+          };
         }
       });
     }
@@ -133,6 +192,7 @@ function renderDashboard(sessionId) {
           <h5>Users</h5>
           <div id="userList"></div>
         </div>
+        ${isHost ? `<button class="btn btn-sm btn-warning mt-3" id="adminPanelBtn">Admin Panel</button>` : ''}
       </nav>
       <main class="col-12 col-md-9 p-4">
         <h1>Dashboard</h1>
@@ -165,6 +225,11 @@ function renderDashboard(sessionId) {
       btn.disabled = false;
       btn.innerHTML = "Generate";
     });
+
+    document.getElementById('adminPanelBtn')?.addEventListener('click', () => {
+      renderAdminPanel();
+      new bootstrap.Modal(document.getElementById('adminPanelModal')).show();
+    });
   }
 }
 
@@ -173,7 +238,8 @@ function broadcastUserList() {
   Object.keys(connections).forEach(pid => {
     cleanList[pid] = {
       name: connections[pid].name,
-      avatarUrl: connections[pid].avatarUrl
+      avatarUrl: connections[pid].avatarUrl,
+      ip: connections[pid].ip || "Unknown"
     };
   });
   Object.keys(connections).forEach(pid => {
@@ -203,6 +269,35 @@ function updateUserList(list) {
   });
 }
 
+function renderAdminPanel() {
+  const table = document.getElementById('adminUserTable');
+  table.innerHTML = '';
+  Object.keys(connections).forEach(pid => {
+    const u = connections[pid];
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td>${u.name}</td>
+      <td>${pid}</td>
+      <td>${u.ip || 'Unknown'}</td>
+      <td>
+        ${pid !== hostPeerId ? `<button class="btn btn-danger btn-sm" onclick="kickUser('${pid}')">Kick</button>` : ''}
+      </td>
+    `;
+    table.appendChild(row);
+  });
+}
+
+function kickUser(pid) {
+  if (connections[pid] && connections[pid].conn) {
+    connections[pid].conn.send({ type: 'kicked' });
+    connections[pid].conn.close();
+    delete connections[pid];
+    broadcastUserList();
+    renderAdminPanel();
+    showToast(`${pid} has been kicked.`, "danger");
+  }
+}
+
 function broadcastToGuests(message) {
   Object.keys(connections).forEach(pid => {
     if (connections[pid].conn) {
@@ -210,58 +305,6 @@ function broadcastToGuests(message) {
     }
   });
 }
-
-let currentPlaceId = null;
-
-async function showGeneratedGame(game) {
-  currentPlaceId = game.placeId;  // ✅ FIXED
-
-  const card = document.getElementById("gameCard");
-  card.innerHTML = `
-    <div class="card bg-dark text-light">
-      <div class="card-body">
-        <h5 class="card-title">${game.name || "Unknown Game"}</h5>
-        <img src="${game.thumbnail || "https://via.placeholder.com/128"}" alt="" class="img-fluid mb-2" style="max-width: 128px;">
-        <p>${game.description || "No description available."}</p>
-        <div>
-          <span class="badge bg-success">Likes: ${game.likes ?? 0}</span>
-          <span class="badge bg-danger">Dislikes: ${game.dislikes ?? 0}</span>
-          <span class="badge bg-primary">Visits: ${game.visits ?? 0}</span>
-          <span class="badge bg-warning">Active: ${game.playing ?? 0}</span>
-        </div>
-        <button class="btn btn-success mt-3" id="joinGameBtn">Join</button>
-      </div>
-    </div>`;
-
-  document.getElementById("joinGameBtn").addEventListener("click", joinGame);
-}
-
-async function joinGame() {
-  if (!currentPlaceId) {
-    showToast("No game to join.", "warning");
-    return;
-  }
-
-  showToast("Finding server to join…", "info");
-  try {
-    const res = await fetch(workerUrl, {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ action: "joinServer", placeId: currentPlaceId })
-    });
-    const data = await res.json();
-
-    if (data.success && data.jobId) {
-      window.location.href = `roblox://placeID=${currentPlaceId}&gameInstanceId=${data.jobId}`;
-    } else {
-      showToast("No joinable server found. Starting new server…", "warning");
-      window.location.href = `roblox://placeID=${currentPlaceId}`;
-    }
-  } catch (err) {
-    showToast(`Error joining game: ${err.message}`, "danger");
-  }
-}
-
 
 function showToast(message, type="info") {
   const container = document.getElementById("toastContainer");
